@@ -1,0 +1,41 @@
+/* Home.css */
+
+/* Contenedor de todo centrado */
+.ion-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 40px; /* un poco de espacio arriba */
+}
+
+/* Inputs centrados y tamaño fijo */
+.ion-input {
+  width: 300px;
+  margin-bottom: 15px;
+}
+
+/* Botón azul */
+.ion-button {
+  width: 300px;
+  background-color: #007bff !important; /* azul */
+  color: white !important; /* texto blanco */
+  margin-bottom: 20px;
+  --border-radius: 8px; /* bordes redondeados */
+}
+
+/* Lista de tareas centrada y con espacio */
+.ion-list {
+  width: 320px;
+}
+
+/* Cada tarea con estilo de tarjeta */
+.ion-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+  padding: 10px;
+  border-radius: 8px;
+  background-color: #f2f2f2;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}

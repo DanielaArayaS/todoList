@@ -1,0 +1,15 @@
+import React from 'react';
+import { IonApp } from '@ionic/react';
+import Home from './pages/Home';
+import '@ionic/react/css/core.css';
+import '@ionic/react/css/normalize.css';
+import '@ionic/react/css/structure.css';
+import '@ionic/react/css/typography.css';
+
+const App: React.FC = () => (
+  <IonApp>
+    <Home />
+  </IonApp>
+);
+
+export default App;

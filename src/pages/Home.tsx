@@ -1,16 +1,15 @@
 // src/pages/Home.tsx
 import React, { useState, useEffect } from 'react';
-
 import {
   IonContent, IonHeader, IonPage, IonTitle, IonToolbar,
-  IonList, IonItem, IonLabel, IonInput, IonButton, IonImg, IonIcon
+  IonList, IonItem, IonLabel, IonInput, IonButton, IonImg, IonIcon, IonToast
 } from '@ionic/react';
 
 import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
 import { Geolocation } from '@capacitor/geolocation';
 import { Network } from '@capacitor/network';
 
-import { imageOutline, locateOutline } from 'ionicons/icons';
+import { imageOutline, locateOutline, cloudUploadOutline, downloadOutline } from 'ionicons/icons';
 
 import './Home.css';
 
@@ -24,7 +23,8 @@ type Task = {
   synced?: boolean;
 };
 
-const STORAGE_KEY = 'tasks_cached';
+const API_ENDPOINT = 'http://192.168.1.51:3000'; 
+const STORAGE_KEY = 'tasks_cached_v2';
 
 const Home: React.FC = () => {
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -32,92 +32,159 @@ const Home: React.FC = () => {
   const [description, setDescription] = useState('');
   const [image, setImage] = useState<string | undefined>();
   const [location, setLocation] = useState<{ lat: number; lng: number } | undefined>();
+  const [toastMsg, setToastMsg] = useState('');
 
-  // ============================
-  // 📌 1) Cargar tareas de Storage al iniciar
-  // ============================
+  // ---------- Cargar desde localStorage al iniciar ----------
   useEffect(() => {
-    const loadData = async () => {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      try {
         setTasks(JSON.parse(saved));
-      }
-    };
-    loadData();
+      } catch {}
+    }
   }, []);
 
-  // ============================
-  // 📌 2) Guardar tareas en Storage cada vez que cambian
-  // ============================
+  // ---------- Guardar en localStorage cada vez que tasks cambie ----------
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
   }, [tasks]);
 
-  // ============================
-  // 📡 3) Listener de red (CORREGIDO)
-  // ============================
+  // ---------- Listener de red (cuando vuelve, intenta sincronizar) ----------
   useEffect(() => {
-    const setupListener = async () => {
-      const listener = await Network.addListener('networkStatusChange', status => {
-        console.log('Estado de red cambió:', status);
-
-        // Si vuelve el internet → intentar sincronizar
-        if (status.connected) {
-          syncTasks();
+    const setup = async () => {
+      const status = await Network.getStatus();
+      if (status.connected) {
+        await syncTasks(); // intenta al iniciar si hay conexión
+      }
+      const listener = await Network.addListener('networkStatusChange', async (s) => {
+        if (s.connected) {
+          setToastMsg('Conexión disponible — sincronizando...');
+          await syncTasks();
         }
       });
-
       return () => {
-        listener.remove(); // ← aquí ya no da error
+        listener.remove();
       };
     };
+    setup();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tasks]); // re-evaluamos cuando tasks cambia para que sync vea la última lista
 
-    setupListener();
-  }, []);
-
-  // ============================
-  // 🔄 Simula sincronización con servidor
-  // ============================
-  const syncTasks = () => {
-    console.log('🔄 Sincronizando tareas...');
-
-    const updated = tasks.map(t => ({
-      ...t,
-      synced: true, // simula que ya se sincronizó
-    }));
-
-    setTasks(updated);
+  // ---------- Helper: POST con reintentos simples ----------
+  const postWithRetry = async (url: string, body: any, retries = 3) => {
+    try {
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      return resp;
+    } catch (err) {
+      if (retries > 0) {
+        await new Promise(r => setTimeout(r, 1000 * (4 - retries))); // espera 1s, 2s, 3s
+        return postWithRetry(url, body, retries - 1);
+      }
+      throw err;
+    }
   };
 
-  // ============================
-  // 📸 Tomar foto
-  // ============================
+  // ---------- Sincronizar tareas no sincronizadas (real) ----------
+  const syncTasks = async () => {
+    const unsynced = tasks.filter(t => !t.synced);
+    if (unsynced.length === 0) {
+      setToastMsg('No hay tareas por sincronizar');
+      return;
+    }
+
+    for (const t of unsynced) {
+      try {
+        const body = {
+          clientId: t.id,
+          title: t.title,
+          description: t.description,
+          image: t.image,
+          location: t.location,
+          createdAt: t.createdAt
+        };
+
+        // POST a /tasks (tu servidor)
+        await postWithRetry(`${API_ENDPOINT}/tasks`, body, 3);
+
+        // si llegamos aquí, fue exitoso: marcar como sincronizada
+        setTasks(prev => prev.map(x => x.id === t.id ? { ...x, synced: true } : x));
+      } catch (err) {
+        console.error('Error sincronizando tarea', t.id, err);
+        // la tarea permanecerá con synced: false y se reintentará más tarde
+      }
+    }
+
+    setToastMsg('Sincronización finalizada (intentos realizados)');
+  };
+
+  // ---------- Importar tareas desde servidor (GET) ----------
+  const importTasksFromServer = async () => {
+    try {
+      const resp = await fetch(`${API_ENDPOINT}/tasks`);
+      if (!resp.ok) throw new Error('API error ' + resp.status);
+      const data = await resp.json();
+
+      // Mapear formato server -> Task local
+      const imported: Task[] = data.map((d: any) => ({
+        id: d.clientId || ('srv-' + (d.serverId || d.id || Date.now())),
+        title: d.title || 'Sin título',
+        description: d.description || '',
+        image: d.image || undefined,
+        location: d.location || undefined,
+        createdAt: d.createdAt || new Date().toISOString(),
+        synced: true
+      }));
+
+      // Merge sin duplicados (por id)
+      const merged = [...tasks];
+      for (const it of imported) {
+        if (!merged.some(t => t.id === it.id)) merged.push(it);
+      }
+
+      setTasks(merged);
+      setToastMsg('Tareas importadas desde servidor');
+    } catch (err) {
+      console.error('Import error', err);
+      setToastMsg('Error al importar tareas');
+    }
+  };
+
+  // ---------- Cámara ----------
   const takePhoto = async () => {
-    const photo = await Camera.getPhoto({
-      quality: 70,
-      resultType: CameraResultType.DataUrl,
-      source: CameraSource.Camera,
-    });
-
-    setImage(photo.dataUrl!);
+    try {
+      const photo = await Camera.getPhoto({
+        quality: 70,
+        resultType: CameraResultType.DataUrl,
+        source: CameraSource.Camera,
+      });
+      setImage(photo.dataUrl!);
+      setToastMsg('Foto tomada');
+    } catch (err) {
+      console.error('Camera error', err);
+      setToastMsg('No se pudo tomar la foto');
+    }
   };
 
-  // ============================
-  // 📍 Obtener ubicación actual
-  // ============================
+  // ---------- Ubicación ----------
   const getLocation = async () => {
-    const pos = await Geolocation.getCurrentPosition();
-    setLocation({
-      lat: pos.coords.latitude,
-      lng: pos.coords.longitude,
-    });
+    try {
+      const pos = await Geolocation.getCurrentPosition();
+      setLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+      setToastMsg('Ubicación obtenida');
+    } catch (err) {
+      console.error('Geo error', err);
+      setToastMsg('No se pudo obtener la ubicación');
+    }
   };
 
-  // ============================
-  // ➕ Añadir tarea
-  // ============================
+  // ---------- Crear tarea local ----------
   const addTask = () => {
-    if (title.trim() === '') return;
+    if (title.trim() === '') { setToastMsg('Título requerido'); return; }
 
     const newTask: Task = {
       id: Date.now().toString(),
@@ -126,86 +193,69 @@ const Home: React.FC = () => {
       image,
       location,
       createdAt: new Date().toISOString(),
-      synced: false,
+      synced: false
     };
 
-    setTasks([...tasks, newTask]);
+    setTasks(prev => [...prev, newTask]);
 
     // limpiar campos
     setTitle('');
     setDescription('');
     setImage(undefined);
     setLocation(undefined);
+    setToastMsg('Tarea creada localmente (pendiente sync)');
   };
 
-  // ============================
-  // ❌ Eliminar tarea
-  // ============================
+  // ---------- Eliminar ----------
   const removeTask = (index: number) => {
-    const newTasks = [...tasks];
-    newTasks.splice(index, 1);
-    setTasks(newTasks);
+    setTasks(prev => {
+      const copy = [...prev];
+      copy.splice(index, 1);
+      return copy;
+    });
+    setToastMsg('Tarea eliminada');
   };
 
   return (
     <IonPage>
       <IonHeader>
         <IonToolbar>
-          <IonTitle>ToDo List Avanzada</IonTitle>
+          <IonTitle>ToDo List - Sync Real</IonTitle>
         </IonToolbar>
       </IonHeader>
 
-      <IonContent className="ion-padding">
+      <IonContent className="ion-padding home-content">
+        <IonInput placeholder="Título" value={title} onIonChange={e => setTitle(e.detail.value!)} />
+        <IonInput placeholder="Descripción" value={description} onIonChange={e => setDescription(e.detail.value!)} />
 
-        {/* Inputs */}
-        <IonInput
-          placeholder="Título"
-          value={title}
-          onIonChange={e => setTitle(e.detail.value!)}
-        />
-        <IonInput
-          placeholder="Descripción"
-          value={description}
-          onIonChange={e => setDescription(e.detail.value!)}
-        />
+        <div className="controls-row">
+          <IonButton onClick={takePhoto} color="medium"><IonIcon icon={imageOutline} /> Foto</IonButton>
+          <IonButton onClick={getLocation} color="medium"><IonIcon icon={locateOutline} /> Ubicación</IonButton>
+          <IonButton onClick={syncTasks} color="primary"><IonIcon icon={cloudUploadOutline} /> Sincronizar</IonButton>
+          <IonButton onClick={importTasksFromServer} color="tertiary"><IonIcon icon={downloadOutline} /> Importar</IonButton>
+        </div>
 
-        {/* Foto */}
-        <IonButton expand="block" onClick={takePhoto}>
-          <IonIcon slot="start" icon={imageOutline} />
-          Tomar Foto
-        </IonButton>
+        {image && <div className="preview"><IonImg src={image} /></div>}
+        {location && <p>📍 {location.lat.toFixed(5)}, {location.lng.toFixed(5)}</p>}
 
-        {image && (
-          <IonImg src={image} style={{ marginTop: 10, borderRadius: 8 }} />
-        )}
+        <IonButton expand="block" onClick={addTask}>Agregar Tarea</IonButton>
 
-        {/* Ubicación */}
-        <IonButton expand="block" onClick={getLocation}>
-          <IonIcon slot="start" icon={locateOutline} />
-          Obtener Ubicación
-        </IonButton>
-
-        {location && (
-          <p>📍 Lat: {location.lat}, Lng: {location.lng}</p>
-        )}
-
-        {/* Lista */}
         <IonList>
           {tasks.map((task, index) => (
             <IonItem key={task.id}>
               <IonLabel>
                 <h2>{task.title}</h2>
                 <p>{task.description}</p>
-                <p>Sincronizada: {task.synced ? '✔️ Sí' : '❌ No'}</p>
+                {task.location && <small>📍 {task.location.lat.toFixed(5)}, {task.location.lng.toFixed(5)}</small>}
+                {task.image && <IonImg src={task.image} style={{ maxWidth: 120, marginTop: 6 }} />}
+                <p>Estado: {task.synced ? '✔️ Sincronizada' : '⏳ Pendiente'}</p>
               </IonLabel>
-
-              <IonButton color="danger" onClick={() => removeTask(index)}>
-                Eliminar
-              </IonButton>
+              <IonButton color="danger" onClick={() => removeTask(index)}>Eliminar</IonButton>
             </IonItem>
           ))}
         </IonList>
 
+        <IonToast isOpen={!!toastMsg} message={toastMsg} duration={1800} onDidDismiss={() => setToastMsg('')} />
       </IonContent>
     </IonPage>
   );
